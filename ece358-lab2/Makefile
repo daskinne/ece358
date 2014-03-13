@@ -1,10 +1,10 @@
 CXXFLAGS =	-O2 -g -Wall -fmessage-length=0
 
-OBJS =		ece358-lab1.o
+OBJS =		ece358-lab2.o
 
 LIBS =
 
-TARGET =	ece358-lab1.exe
+TARGET =	ece358-lab2.exe
 
 $(TARGET):	$(OBJS)
 	$(CXX) -o $(TARGET) $(OBJS) $(LIBS)
