@@ -10,6 +10,8 @@
 #include <time.h>
 #include <math.h>
 #include <list>
+#include <pair>
+#include <make_pair>
 using namespace std;
 
 //NEXT_EXPECTED_FRAME - represents the frame sequence number that it is expecting.
@@ -20,7 +22,6 @@ using namespace std;
 
 //If out of order:
 //ACK with the current value of NEXT_EXPECTED_FRAME as RN. (not incremented)
-
 
 //Sender:
 //the sender maintains a counter NEXT_EXPECTED_ACK which is set to SN+1 (modulo 2)
@@ -64,84 +65,72 @@ using namespace std;
 //ACK RN=3
 //Discard 4
 
-/*
-Event types:
-
-TIME-OUT
-ACK
-
-Event:
-type (T/A)
-time
-sequence-number
-error-flag (error)
- */
 
 
 /*
-tc = 0 (current_time)
-SN = 0
-NEXT_EXPECTED_ACK = 1
+ tc = 0 (current_time)
+ SN = 0
+ NEXT_EXPECTED_ACK = 1
 
-packet length L=H+l
-*fixed length*
+ packet length L=H+l
+ *fixed length*
 
-//transmit time:
+ //transmit time:
  * tc + L/C
 
-for each packet, add a timeout event right away at
-tc + L/C + Δ
+ for each packet, add a timeout event right away at
+ tc + L/C + Δ
 
-call forward channel
-Event SEND()
-:returns ACK that must be added to ES
-or NIL (loss)
-:implements
-receiver
-//remove event from ES
-//update tc
-//if time-out
-//packet with SN sent to the channel in new frame
-//there can be only one time-out in the ES
-//else if ACK without ERROR
-//SN++
-//NEXT_EXPECT++
+ call forward channel
+ Event SEND()
+ :returns ACK that must be added to ES
+ or NIL (loss)
+ :implements
+ receiver
+ //remove event from ES
+ //update tc
+ //if time-out
+ //packet with SN sent to the channel in new frame
+ //there can be only one time-out in the ES
+ //else if ACK without ERROR
+ //SN++
+ //NEXT_EXPECT++
 
-//any outstanding time-outs in ES
-//have to be purged and a new time-out at tc + L/C + Δ has to be registered
-
-
-reverse channel
+ //any outstanding time-outs in ES
+ //have to be purged and a new time-out at tc + L/C + Δ has to be registered
 
 
-2)
-Frame or Ack Lost:
-P = PLOSS
-Arrives: 1-P
-Error:
-ERROR/NOERROR
+ reverse channel
 
-Pnoerror = (1−BER)^L
-Ploss = 1 - Pnoerror - Perror
 
-Perror = sum_k=1:4{(L_choose_K)BER^k(1-BER)^(L-k)}
+ 2)
+ Frame or Ack Lost:
+ P = PLOSS
+ Arrives: 1-P
+ Error:
+ ERROR/NOERROR
 
-We expect you to run L iterations.
-1-> probability BER
-Count errors for L bits
+ Pnoerror = (1−BER)^L
+ Ploss = 1 - Pnoerror - Perror
 
-LOSS - 5 or more bit errors to be a lost frame
-ERROR - 1 to 4 bits in error
-OK - 0
+ Perror = sum_k=1:4{(L_choose_K)BER^k(1-BER)^(L-k)}
 
-propagation delay τ
+ We expect you to run L iterations.
+ 1-> probability BER
+ Count errors for L bits
 
-Input: tc, SN, L
-returns:
-NIL (lost)
-t+Tau, flag (error), SN(unchanged)
+ LOSS - 5 or more bit errors to be a lost frame
+ ERROR - 1 to 4 bits in error
+ OK - 0
+
+ propagation delay τ
+
+ Input: tc, SN, L
+ returns:
+ NIL (lost)
+ t+Tau, flag (error), SN(unchanged)
  */
- */
+*/
 
 double unviform_rv() {
 	return ((double) rand() / ((double) RAND_MAX + 1));
@@ -154,16 +143,29 @@ double exponential_rv(double lambda) {
 }
 
 namespace Sim {
+
+
+/*
+ Event types:
+
+ TIME-OUT
+ ACK
+
+ Event:
+ type (T/A)
+ time
+ sequence-number
+ error-flag (error)
+ */
 enum EventType {
-	ARRIVAL, DEPARTURE, OBSERVATION
+	TIMEOUT, ACK
 };
 
 struct simEvent {
 	EventType type;
-	int id;
-	double packetLength;
 	double time;
-	bool dropped;
+	double SN;
+	bool error;
 } SimEvent;
 
 bool compare_times(simEvent& first, simEvent& second) {
@@ -172,38 +174,120 @@ bool compare_times(simEvent& first, simEvent& second) {
 ;
 
 class Simulator {
-	int Na; //Arrivals
-	int Nd; //Departures
-	int No; //Observations
-	int linkRate;
-	int queueSize;
-	int durationT;
-	int avgPacketSize;
+	int H, l, Delta, C;
+	double tc, Tau, BER; //current-time
 	list<simEvent> ES;
 
 public:
 	/////////STATS/////
-	int num_observations;
 	int num_packets;
-	double num_packets_in_buffer;
-	double sojourn_time;
-	double pIdle;
-	double pLoss;
+	int num_sent_success;
+	int NEXT_EXPECTED_FRAME;
+	int NEXT_EXPECTED_ACK;
+	int SN;
 	//////////////////
 
-	Simulator(int linkRate, int queueSize, int durationT, int L) {
-		this->linkRate = linkRate;
-		this->queueSize = queueSize;
-		this->durationT = durationT;
-		this->avgPacketSize = L;
-		this->num_packets_in_buffer = 0;
-		this->sojourn_time = 0;
-		this->pIdle = 0;
-		this->pLoss = 0;
+	Simulator(int H, int l, int Delta, int C, double Tau, double BER,
+			int num_packets) {
+		this->H = H;
+		this->l = l;
+		this->Delta = Delta;
+		this->C = C;
+		this->Tau = Tau;
+		this->BER = BER;
+		this->num_packets = num_packets;
+		this->tc = 0;
+		this->num_sent_success = 0;
 	}
 	~Simulator() {
 		ES.clear();
 	}
+
+	void send_packets(){
+		while(this->num_sent_success < this->num_packets){
+			simEvent packet;
+			packet.SN = this->SN+1 %2;
+			packet.time=this->tc + (double)this->l/(double)this->C;
+			simEvent timeout;
+			packet.time = this->tc +(double)(this->l+this->H)/(double)this->C + (double)this->Delta;
+			ES.push_back(timeout);
+			simEvent ack = this->SEND(packet);
+			if (ack != 0){
+				ES.push_back(ack);
+			}
+		}
+	}
+
+	simEvent SEND(simEvent packet){
+		 //returns ACK that must be added to ES
+		 //or NIL (loss)
+		 //:implements
+		 //receiver
+		this->tc = packet.time;
+
+		//remove event from ES
+		 //update tc
+		 //if time-out
+		 //packet with SN sent to the channel in new frame
+		 //there can be only one time-out in the ES
+		 pair<double,bool> ACK = this->RECIEVE(this->tc, this->SN);
+		 if (ACK.second){
+			 //ERROR
+		 }else{
+			 this->SN = this->SN+1%2;
+			 this->NEXT_EXPECTED_FRAME = this->NEXT_EXPECTED_FRAME +1%2;
+			 this->num_sent_success++;
+			 simEvent ack;
+			 ack.SN=this->SN;
+			 ack.time=pair.first;
+			 return ack;
+		 }
+		 return 0;
+		 //else if ACK without ERROR
+		 //SN++
+		 //NEXT_EXPECT++
+
+		 //any outstanding time-outs in ES
+		 //have to be purged and a new time-out at tc + L/C + Δ has to be registered
+	}
+
+	int bits_in_error(){
+		/*
+		 Pnoerror = (1−BER)^L
+		 Ploss = 1 - Pnoerror - Perror
+
+		 Perror = sum_k=1:4{(L_choose_K)BER^k(1-BER)^(L-k)}
+
+		 We expect you to run L iterations.
+		 1-> probability BER
+		 Count errors for L bits
+		 */
+		int count=0;
+		for(int i = 0; i < this->l; i++){
+			//TODO: change to random variable
+			count += this->BER;
+		}
+		return count;
+	}
+
+	pair<double, bool> RECIEVE(double tc, int SN){
+		//Calculate bits in error, and flag packet
+		int BIE = bits_in_error();
+		// LOSS - 5 or more bit errors to be a lost frame
+		//ERROR - 1 to 4 bits in error
+		//OK - 0
+		bool error = false;
+		if(BIE >= 5){
+			return 0;
+		}else if(BIE>1){
+			//ERROR
+			error=true;
+		}else{
+			//OK
+		}
+		return std::make_pair(tc+this->Tau,error);
+	}
+
 	void generate_observations(double alpha) {
 		double time = 0;
 		int i = 1;
@@ -407,10 +491,9 @@ void question_6() {
 }
 
 int main(void) {
-	srand(time(NULL));
+	srand (time(NULL));
 
-
-	k_values.push_back(5);
+k_values	.push_back(5);
 	k_values.push_back(10);
 	k_values.push_back(40);
 	question_1();
