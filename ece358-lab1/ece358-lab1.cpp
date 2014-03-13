@@ -1,8 +1,8 @@
 //============================================================================
 // Name        : ece358-lab1.cpp
-// Author      : 
-// Version     :
-// Copyright   : Your copyright notice
+// Author      : David Skinner
+// Version     : 1.0
+// Copyright   : All the things below, are belong to me
 //============================================================================
 
 #include <stdio.h>
@@ -73,7 +73,7 @@ public:
 	~Simulator() {
 		ES.clear();
 	}
-	void generate_observations(int alpha) {
+	void generate_observations(double alpha) {
 		double time = 0;
 		int i = 1;
 		while (true) {
@@ -91,7 +91,7 @@ public:
 		}
 		num_observations = i;
 	}
-	void generate_arrivals(int lambda) {
+	void generate_arrivals(double lambda) {
 		double time = 0;
 		int i = 1;
 		while (true) {
@@ -158,7 +158,7 @@ public:
 			//printf("Packet departs at time %f id %d \n", e.time, e.id);
 			ES.push_back(e);
 
-			sojourn_time += it->time;
+			sojourn_time += departureTime - it->time;
 			packet_count++;
 			//time advances to take new packet
 			current_time = departureTime;
@@ -206,52 +206,85 @@ public:
 
 };
 }
+void run_simulation(int k, double p) {
+	int T = 11000;
+	int L = 12000;
+	double C = pow(1024, 2);
+	double lambda = p * C / (double) L;
+	double alpha = lambda;
+	int queue_size = k;
+	Sim::Simulator* sim = new Sim::Simulator(C, queue_size, T, L);
+	//Generate observation events, poisson parameter alpha ( if less than T)
+	sim->generate_observations(alpha);
+	//Packet arrival times (parameter lambda)
+	sim->generate_arrivals(lambda);
+	sim->order_events();
+	//Find departure times
+	sim->calculate_departures();
+	//packet arrivals so far, packets departures so far
+	sim->order_events();
+	sim->observe_events();
+	printf("%f\t%d\t%f\t%f\t%f\t%f\t%f\t%f\t\n", p, T, lambda, alpha,
+			sim->num_packets_in_buffer, sim->sojourn_time, sim->pIdle,
+			sim->pLoss);
+	//number of observations
+	delete sim;
+}
+list<int> k_values;
+
+void question_1() {
+	printf("Question 1\r\n");
+	int i = 0;
+	do {
+		i++;
+		printf("%f\n", exponential_rv(75.0));
+	} while (i < 1000);
+}
+
+void question_3() {
+	printf("Question 3\r\n");
+	printf("p\tT\tlambda\talpha\tbuffer\tsojourn\tidle\tpLoss\t\n");
+	int k = 0;
+	for (double p = 0.35; p < 0.85; p += 0.1) {
+		run_simulation(k, p);
+	}
+}
+void question_4() {
+	printf("Question 4\r\n");
+	printf("p\tT\tlambda\talpha\tbuffer\tsojourn\tidle\tpLoss\t\n");
+	double p = 1.2;
+	run_simulation(0, p);
+}
+
+void question_6() {
+	printf("Question 4\r\n");
+	printf("p\tT\tlambda\talpha\tbuffer\tsojourn\tidle\tpLoss\t\n");
+	for (list<int>::iterator ki = k_values.begin(); ki != k_values.end();
+			++ki) {
+		int k = *ki;
+		printf("k=%d\n", k);
+		for (double p = 0.4; p < 2; p += 0.1) {
+			run_simulation(k, p);
+		}
+		for (double p = 2; p < 5; p += 0.2) {
+			run_simulation(k, p);
+		}
+		for (double p = 5; p < 10; p += 0.4) {
+			run_simulation(k, p);
+		}
+	}
+}
 
 int main(void) {
 	srand(time(NULL));
-	double p = 1.2;
-	printf("p\tT\tlambda\talpha\tbuffer\tsojourn\tidle\tpLoss\t\n");
-	//for (double p = 0.35; p < 0.85; p += 0.1) {
-	//int k = 0;
-	list<int> k_values;
+
+
 	k_values.push_back(5);
 	k_values.push_back(10);
 	k_values.push_back(40);
-	for (list<int>::iterator ki = k_values.begin(); ki != k_values.end(); ++ki) {
-		int k = *ki;
-		printf("k=%d\n", k);
-		//for (double p = 0.4; p < 2; p += 0.1) {
-		//for (double p = 2; p < 5; p += 0.2) {
-		for (double p = 5; p < 10; p += 0.4) {
-			int T = 11000;
-			int L = 12000;
-			double C = pow(1024, 2);
-			double lambda = p * C / (double) L;
-			double alpha = lambda;
-			int queue_size = k;
-			Sim::Simulator* sim = new Sim::Simulator(C, queue_size, T, L);
-			//Generate observation events, poisson parameter alpha ( if less than T)
-			sim->generate_observations(alpha);
-			//Packet arrival times (parameter lambda)
-			sim->generate_arrivals(lambda);
-			sim->order_events();
-			//Find departure times
-			sim->calculate_departures();
-			//packet arrivals so far, packets departures so far
-			sim->order_events();
-			sim->observe_events();
-			printf("%f\t%d\t%f\t%f\t%f\t%f\t%f\t%f\t\n", p, T, lambda, alpha,
-					sim->num_packets_in_buffer, sim->sojourn_time, sim->pIdle,
-					sim->pLoss);
-			//number of observations
-			delete sim;
-		}
-	}
-//	int i = 0;
-//	do {
-//		i++;
-//		printf("%f\n", poisson_rv(1/75.0));
-//	} while (i < 1000);
-	return EXIT_SUCCESS;
+	question_1();
+	question_3();
+	question_4();
+	question_6();
 }
 ;
