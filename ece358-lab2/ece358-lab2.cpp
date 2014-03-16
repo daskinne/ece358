@@ -10,8 +10,7 @@
 #include <time.h>
 #include <math.h>
 #include <list>
-#include <pair>
-#include <make_pair>
+#include <utility>
 using namespace std;
 
 //NEXT_EXPECTED_FRAME - represents the frame sequence number that it is expecting.
@@ -64,8 +63,6 @@ using namespace std;
 //RCV 4, EXPECT=3
 //ACK RN=3
 //Discard 4
-
-
 
 /*
  tc = 0 (current_time)
@@ -130,20 +127,12 @@ using namespace std;
  NIL (lost)
  t+Tau, flag (error), SN(unchanged)
  */
-*/
 
-double unviform_rv() {
+double uniform_rv() {
 	return ((double) rand() / ((double) RAND_MAX + 1));
 }
 
-double exponential_rv(double lambda) {
-	//X = exp(-1*lambda*V);
-	//V = -1*ln(X)/lambda
-	return (double) -log(unviform_rv()) / (double) lambda;
-}
-
 namespace Sim {
-
 
 /*
  Event types:
@@ -161,6 +150,10 @@ enum EventType {
 	TIMEOUT, ACK
 };
 
+enum ErrorType {
+	NONE, ERROR, LOSS
+};
+
 struct simEvent {
 	EventType type;
 	double time;
@@ -172,14 +165,19 @@ bool compare_times(simEvent& first, simEvent& second) {
 	return first.time < second.time;
 }
 ;
+bool timeout_event(simEvent& x) {
+	return (bool)(x.type == TIMEOUT);
+}
+;
 
-class Simulator {
-	int H, l, Delta, C;
-	double tc, Tau, BER; //current-time
+class ABPSimulator {
+	int H, l, C;
+	double Delta, Tau, BER; //current-time
 	list<simEvent> ES;
 
 public:
 	/////////STATS/////
+	double tc;
 	int num_packets;
 	int num_sent_success;
 	int NEXT_EXPECTED_FRAME;
@@ -187,7 +185,7 @@ public:
 	int SN;
 	//////////////////
 
-	Simulator(int H, int l, int Delta, int C, double Tau, double BER,
+	ABPSimulator(int H, int l, double Delta, int C, double Tau, double BER,
 			int num_packets) {
 		this->H = H;
 		this->l = l;
@@ -197,308 +195,191 @@ public:
 		this->BER = BER;
 		this->num_packets = num_packets;
 		this->tc = 0;
+		/*
+		 * INITIAL VALUES
+		 */
 		this->num_sent_success = 0;
+		this->SN = 0;
+		this->NEXT_EXPECTED_ACK = 1;
 	}
-	~Simulator() {
+	~ABPSimulator() {
 		ES.clear();
 	}
 
-	void send_packets(){
-		while(this->num_sent_success < this->num_packets){
-			simEvent packet;
-			packet.SN = this->SN+1 %2;
-			packet.time=this->tc + (double)this->l/(double)this->C;
-			simEvent timeout;
-			packet.time = this->tc +(double)(this->l+this->H)/(double)this->C + (double)this->Delta;
-			ES.push_back(timeout);
-			simEvent ack = this->SEND(packet);
-			if (ack != 0){
-				ES.push_back(ack);
+	void es_sorted_insert(simEvent event) {
+		list<simEvent>::iterator next = ES.begin();
+		while (next != ES.end()) {
+			if (next->time > event.time) {
+				ES.insert(next, event);
+				return;
+			}
+			++next;
+		}
+		ES.push_back(event);
+	}
+
+	void send_packets() {
+		addTimeout();
+		while (this->num_sent_success < this->num_packets) {
+			this->tc += ((double) this->l / (double) this->C) + this->Tau;
+			SEND(this->tc, this->SN);
+			simEvent latest = getEvent();
+			if (latest.type == TIMEOUT) {
+				//printf("TIMEOUT SN %d tc %f \r\n", this->SN, this->tc);
+				//fflush(stdout);
+				this->tc = latest.time;
+				addTimeout(); //Add a new timeout
+			} else if (latest.SN == this->NEXT_EXPECTED_ACK) {
+				//printf("OK SN %d tc %f \r\n", SN, this->tc);
+				//fflush(stdout);
+				this->NEXT_EXPECTED_ACK = (this->NEXT_EXPECTED_ACK + 1) % 2;
+			} else {
+				//retransmit
 			}
 		}
 	}
 
-	simEvent SEND(simEvent packet){
-		 //returns ACK that must be added to ES
-		 //or NIL (loss)
-		 //:implements
-		 //receiver
-		this->tc = packet.time;
-
-		//remove event from ES
-		 //update tc
-		 //if time-out
-		 //packet with SN sent to the channel in new frame
-		 //there can be only one time-out in the ES
-		 pair<double,bool> ACK = this->RECIEVE(this->tc, this->SN);
-		 if (ACK.second){
-			 //ERROR
-		 }else{
-			 this->SN = this->SN+1%2;
-			 this->NEXT_EXPECTED_FRAME = this->NEXT_EXPECTED_FRAME +1%2;
-			 this->num_sent_success++;
-			 simEvent ack;
-			 ack.SN=this->SN;
-			 ack.time=pair.first;
-			 return ack;
-		 }
-		 return 0;
-		 //else if ACK without ERROR
-		 //SN++
-		 //NEXT_EXPECT++
-
-		 //any outstanding time-outs in ES
-		 //have to be purged and a new time-out at tc + L/C + Δ has to be registered
+	void purgeTimeouts() {
+		ES.remove_if(timeout_event);
 	}
 
-	int bits_in_error(){
+	void addTimeout() {
+		purgeTimeouts();
+		simEvent* timeout = new simEvent();
+		timeout->time = this->tc
+				+ (double) (this->l + this->H) / (double) this->C
+				+ (double) this->Delta;
+		this->es_sorted_insert(*timeout);
+	}
+
+	simEvent getEvent() {
+		list<simEvent>::iterator next = ES.begin();
+		while (next != ES.end()) {
+			if (next->time >= this->tc) {
+				return *next;
+			}
+			++next;
+		}
+		return *next;
+	}
+
+	void SEND(double time, int SN) {
+		ErrorType ack_value = this->RECIEVE(time, this->SN);
+
+		if (ack_value != LOSS) {
+			this->tc += this->Tau + ((double)this->H / (double) this->C);
+			//NOT LOST - ADD ACK TO ES
+			//NO ERROR: INCREMENT SN
+			if (ack_value == NONE) {
+				SN = (SN + 1) % 2;
+				this->SN = SN;
+			}
+			//ELSE: ERROR ACK PREVIOUS
+			simEvent* ack = new simEvent();
+			ack->type = ACK;
+			ack->SN = SN;
+			ack->time = this->tc;
+			ack->error = (bool) (ack_value == ERROR);
+			this->es_sorted_insert(*ack);
+		}else{
+			printf("LOSS SN %d tc %f \r\n", SN, this->tc);
+			fflush(stdout);
+		}
+		return;
+	}
+
+	int bits_in_error() {
 		/*
-		 Pnoerror = (1−BER)^L
-		 Ploss = 1 - Pnoerror - Perror
-
-		 Perror = sum_k=1:4{(L_choose_K)BER^k(1-BER)^(L-k)}
-
 		 We expect you to run L iterations.
 		 1-> probability BER
 		 Count errors for L bits
 		 */
-		int count=0;
-		for(int i = 0; i < this->l; i++){
-			//TODO: change to random variable
-			count += this->BER;
+		int count = 0;
+		for (int i = 0; i < this->l; i++) {
+			count += (uniform_rv() > this->BER) ? 0 : 1;
 		}
 		return count;
 	}
 
-	pair<double, bool> RECIEVE(double tc, int SN){
+	ErrorType RECIEVE(double tc, int SN) {
 		//Calculate bits in error, and flag packet
 		int BIE = bits_in_error();
 		// LOSS - 5 or more bit errors to be a lost frame
 		//ERROR - 1 to 4 bits in error
 		//OK - 0
-		bool error = false;
-		if(BIE >= 5){
-			return 0;
-		}else if(BIE>1){
+		if (BIE >= 5) {
+			return LOSS;
+		} else if (BIE > 1) {
 			//ERROR
-			error=true;
-		}else{
+			return ERROR;
+		} else {
+			if(SN == NEXT_EXPECTED_FRAME){
+				NEXT_EXPECTED_FRAME = (NEXT_EXPECTED_FRAME + 1) % 2;
+				this->num_sent_success++;
+			}
 			//OK
 		}
-		return std::make_pair(tc+this->Tau,error);
+		return NONE;
 	}
-
-	void generate_observations(double alpha) {
-		double time = 0;
-		int i = 1;
-		while (true) {
-			simEvent e;
-			e.type = OBSERVATION;
-			e.id = i;
-			e.dropped = false;
-			time += exponential_rv(alpha);
-			e.time = time;
-			if (e.time > durationT) {
-				break;
-			}
-			i++;
-			ES.push_back(e);
-		}
-		num_observations = i;
-	}
-	void generate_arrivals(double lambda) {
-		double time = 0;
-		int i = 1;
-		while (true) {
-			simEvent e;
-			e.type = ARRIVAL;
-			e.id = i;
-			e.dropped = false;
-			e.packetLength = exponential_rv(1.0 / (double) avgPacketSize);
-			time += exponential_rv(lambda);
-			e.time = time;
-			if (e.time > durationT) {
-				break;
-			}
-			i++;
-			ES.push_back(e);
-		}
-		num_packets = i;
-	}
-
-	void calculate_departures() {
-		double current_time = 0;
-		int packet_count = 0;
-		for (list<simEvent>::iterator it = ES.begin(); it != ES.end(); ++it) {
-			if (it->type != ARRIVAL || it->dropped) {
-				continue;
-			}
-			//How long has this packet been waiting?
-			//printf("Packet at time %f (delta)%f: id %d size: %f \n", it->time, (current_time - it->time), it->id, it->packetLength);
-			if (it->time > current_time) {
-				current_time = it->time;
-			}
-			//add departure event at
-			double departureTime = (double) current_time
-					+ (it->packetLength / (double) linkRate);
-
-			if (queueSize > 0) {
-				//if finite queue, mark dropped packets by considering the number left in the queue while servicing
-				//count # events between current time and departureTime, if > queueSize, drop packet
-				int numQueued = 0;
-				for (list<simEvent>::iterator dq = it; dq != ES.end(); ++dq) {
-					if (dq->type != ARRIVAL || dq->dropped) {
-						//only check arrivals and packets that have not yet been dropped
-						continue;
-					}
-					if (dq->time > departureTime) {
-						break;
-						//We have moved beyond the affected interval
-					}
-					if (numQueued == queueSize) {
-						//Start dropping packets
-						//printf("Packet id %d dropped (time:%f)\n", dq->id, dq->time);
-						dq->dropped = true;
-						pLoss++;
-					} else {
-						numQueued++;
-					}
-				}
-			}
-			//add departure event
-			simEvent e;
-			e.id = it->id;
-			e.type = DEPARTURE;
-			e.time = departureTime;
-			//printf("Packet departs at time %f id %d \n", e.time, e.id);
-			ES.push_back(e);
-
-			sojourn_time += departureTime - it->time;
-			packet_count++;
-			//time advances to take new packet
-			current_time = departureTime;
-		}
-		//average sojourn time
-		sojourn_time /= (double) packet_count;
-		pLoss /= (double) num_packets;
-	}
-
-	void order_events() {
-		ES.sort(compare_times);
-	}
-
-	void observe_event(simEvent* se) {
-		switch (se->type) {
-		case ARRIVAL:
-			if (!se->dropped) {
-				Na++;
-			}
-			break;
-		case DEPARTURE:
-			Nd++;
-			break;
-		case OBSERVATION:
-			No++;
-			num_packets_in_buffer += Na - Nd;
-			if (Na == Nd) {
-				pIdle++;
-			}
-			//printf("Time: %f No %d Na %d Nd %d\n", se->time, No, Na, Nd);
-			break;
-		}
-	}
-
-	void observe_events() {
-		Na = 0;
-		Nd = 0;
-		No = 0;
-		for (list<simEvent>::iterator it = ES.begin(); it != ES.end(); ++it) {
-			observe_event(&*it);
-		}
-		pIdle /= num_observations;
-		num_packets_in_buffer /= (double) num_observations;
-	}
-
 };
-}
-void run_simulation(int k, double p) {
-	int T = 11000;
-	int L = 12000;
-	double C = pow(1024, 2);
-	double lambda = p * C / (double) L;
-	double alpha = lambda;
-	int queue_size = k;
-	Sim::Simulator* sim = new Sim::Simulator(C, queue_size, T, L);
-	//Generate observation events, poisson parameter alpha ( if less than T)
-	sim->generate_observations(alpha);
-	//Packet arrival times (parameter lambda)
-	sim->generate_arrivals(lambda);
-	sim->order_events();
-	//Find departure times
-	sim->calculate_departures();
-	//packet arrivals so far, packets departures so far
-	sim->order_events();
-	sim->observe_events();
-	printf("%f\t%d\t%f\t%f\t%f\t%f\t%f\t%f\t\n", p, T, lambda, alpha,
-			sim->num_packets_in_buffer, sim->sojourn_time, sim->pIdle,
-			sim->pLoss);
-	//number of observations
-	delete sim;
-}
-list<int> k_values;
 
-void question_1() {
-	printf("Question 1\r\n");
-	int i = 0;
-	do {
-		i++;
-		printf("%f\n", exponential_rv(75.0));
-	} while (i < 1000);
 }
-
-void question_3() {
-	printf("Question 3\r\n");
-	printf("p\tT\tlambda\talpha\tbuffer\tsojourn\tidle\tpLoss\t\n");
-	int k = 0;
-	for (double p = 0.35; p < 0.85; p += 0.1) {
-		run_simulation(k, p);
+void question_1(double BER){
+	printf("BER: %f\n", BER);
+	printf("H\tL\tDelta\tC\tTau\tBER\t#Packets\tThroughput\n");
+	int C = 5 * pow(1024, 2);
+	int num_packets = 10000;
+	int L = 1500;
+	int H = 54;
+	double Tau = 0.010;
+	for (double x = 2.5; x < 13; x+=2.5){
+		double Delta = x * Tau;
+	//double Tau = 0.500;
+		Sim::ABPSimulator* sim = new Sim::ABPSimulator(H, L, Delta, C, Tau, BER,
+				num_packets);
+		sim->send_packets();
+		printf("%d\t%d\t%f\t%d\t%f\t%f\t%d\t",H,L, Delta, C, Tau, BER, num_packets);
+		printf("%f\n", ((double)num_packets * (double)L) / (double) sim->tc);
+		fflush(stdout);
+		delete sim;
 	}
 }
-void question_4() {
-	printf("Question 4\r\n");
-	printf("p\tT\tlambda\talpha\tbuffer\tsojourn\tidle\tpLoss\t\n");
-	double p = 1.2;
-	run_simulation(0, p);
-}
 
-void question_6() {
-	printf("Question 4\r\n");
-	printf("p\tT\tlambda\talpha\tbuffer\tsojourn\tidle\tpLoss\t\n");
-	for (list<int>::iterator ki = k_values.begin(); ki != k_values.end();
-			++ki) {
-		int k = *ki;
-		printf("k=%d\n", k);
-		for (double p = 0.4; p < 2; p += 0.1) {
-			run_simulation(k, p);
-		}
-		for (double p = 2; p < 5; p += 0.2) {
-			run_simulation(k, p);
-		}
-		for (double p = 5; p < 10; p += 0.4) {
-			run_simulation(k, p);
-		}
+void question_2(double BER){
+	printf("BER: %f\n", BER);
+	printf("H\tL\tDelta\tC\tTau\tBER\t#Packets\tThroughput\n");
+	int C = 5 * pow(1024, 2);
+	int num_packets = 10000;
+	int L = 1500;
+	int H = 54;
+	double Tau = 0.010;
+	for (double x = 2.5; x < 13; x+=2.5){
+		double Delta = x * Tau;
+	//double Tau = 0.500;
+		Sim::ABP_NAK* sim = new Sim::ABP_NAK(H, L, Delta, C, Tau, BER,
+				num_packets);
+		sim->send_packets();
+		printf("%d\t%d\t%f\t%d\t%f\t%f\t%d\t",H,L, Delta, C, Tau, BER, num_packets);
+		printf("%f\n", ((double)num_packets * (double)L) / (double) sim->tc);
+		fflush(stdout);
+		delete sim;
 	}
 }
+
 
 int main(void) {
-	srand (time(NULL));
-
-k_values	.push_back(5);
-	k_values.push_back(10);
-	k_values.push_back(40);
-	question_1();
-	question_3();
-	question_4();
-	question_6();
+	srand(time(NULL));
+	question_1(0.0);
+	question_1(pow(10,-5));
+	question_1(pow(10,-4));
+	return 0;
+//k_values	.push_back(5);
+//	k_values.push_back(10);
+//	k_values.push_back(40);
+//	question_1();
+//	question_3();
+//	question_4();
+//	question_6();
 }
 ;
+
