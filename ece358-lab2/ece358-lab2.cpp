@@ -10,6 +10,7 @@
 #include <time.h>
 #include <math.h>
 #include <list>
+#include <set>
 #include <utility>
 using namespace std;
 
@@ -154,10 +155,15 @@ enum ErrorType {
 	NONE, ERROR, LOSS
 };
 
+struct Packet {
+	int SN;
+	double timeout;
+} SimPacket;
+
 struct simEvent {
 	EventType type;
 	double time;
-	double SN;
+	int SN;
 	bool error;
 } SimEvent;
 
@@ -166,7 +172,7 @@ bool compare_times(simEvent& first, simEvent& second) {
 }
 ;
 bool timeout_event(simEvent& x) {
-	return (bool)(x.type == TIMEOUT);
+	return (bool) (x.type == TIMEOUT);
 }
 ;
 
@@ -182,7 +188,6 @@ public:
 	int num_sent_success;
 	int NEXT_EXPECTED_FRAME;
 	int NEXT_EXPECTED_ACK;
-	int SN;
 	//////////////////
 
 	ABPSimulator(int H, int l, double Delta, int C, double Tau, double BER,
@@ -199,7 +204,7 @@ public:
 		 * INITIAL VALUES
 		 */
 		this->num_sent_success = 0;
-		this->SN = 0;
+		this->NEXT_EXPECTED_FRAME = 0;
 		this->NEXT_EXPECTED_ACK = 1;
 	}
 	~ABPSimulator() {
@@ -221,15 +226,16 @@ public:
 	void send_packets() {
 		addTimeout();
 		while (this->num_sent_success < this->num_packets) {
-			this->tc += ((double) this->l / (double) this->C) + this->Tau;
-			SEND(this->tc, this->SN);
+			this->tc += ((double) (this->l + this->H) / (double) this->C)
+					+ this->Tau;
+			SEND(this->tc, NEXT_EXPECTED_FRAME);
 			simEvent latest = getEvent();
 			if (latest.type == TIMEOUT) {
 				//printf("TIMEOUT SN %d tc %f \r\n", this->SN, this->tc);
 				//fflush(stdout);
 				this->tc = latest.time;
 				addTimeout(); //Add a new timeout
-			} else if (latest.SN == this->NEXT_EXPECTED_ACK) {
+			} else if (!latest.error && latest.SN == this->NEXT_EXPECTED_ACK) {
 				//printf("OK SN %d tc %f \r\n", SN, this->tc);
 				//fflush(stdout);
 				this->NEXT_EXPECTED_ACK = (this->NEXT_EXPECTED_ACK + 1) % 2;
@@ -264,24 +270,18 @@ public:
 	}
 
 	void SEND(double time, int SN) {
-		ErrorType ack_value = this->RECIEVE(time, this->SN);
+		ErrorType ack_value = this->RECIEVE(time, SN);
 
 		if (ack_value != LOSS) {
-			this->tc += this->Tau + ((double)this->H / (double) this->C);
+			this->tc += this->Tau + ((double) this->H / (double) this->C);
 			//NOT LOST - ADD ACK TO ES
-			//NO ERROR: INCREMENT SN
-			if (ack_value == NONE) {
-				SN = (SN + 1) % 2;
-				this->SN = SN;
-			}
-			//ELSE: ERROR ACK PREVIOUS
 			simEvent* ack = new simEvent();
 			ack->type = ACK;
-			ack->SN = SN;
+			ack->SN = NEXT_EXPECTED_FRAME;
 			ack->time = this->tc;
 			ack->error = (bool) (ack_value == ERROR);
 			this->es_sorted_insert(*ack);
-		}else{
+		} else {
 			printf("LOSS SN %d tc %f \r\n", SN, this->tc);
 			fflush(stdout);
 		}
@@ -313,7 +313,7 @@ public:
 			//ERROR
 			return ERROR;
 		} else {
-			if(SN == NEXT_EXPECTED_FRAME){
+			if (SN == NEXT_EXPECTED_FRAME) {
 				NEXT_EXPECTED_FRAME = (NEXT_EXPECTED_FRAME + 1) % 2;
 				this->num_sent_success++;
 			}
@@ -323,8 +323,222 @@ public:
 	}
 };
 
+class GBN {
+	int H, l, C, window_size;
+	double Delta, Tau, BER; //current-time
+	list<simEvent> ES;
+	list<Packet> BUFFER;
+public:
+	/////////STATS/////
+	double tc;
+	int num_packets;
+	int num_sent_success;
+	int NEXT_EXPECTED_FRAME;
+	int NEXT_EXPECTED_ACK;
+	int NEXT_SN;
+	//////////////////
+
+	GBN(int H, int l, double Delta, int C, double Tau, double BER,
+			int num_packets, int window_size) {
+		this->H = H;
+		this->l = l;
+		this->Delta = Delta;
+		this->C = C;
+		this->Tau = Tau;
+		this->BER = BER;
+		this->num_packets = num_packets;
+		this->tc = 0;
+		this->window_size = window_size;
+		/*
+		 * INITIAL VALUES
+		 */
+		this->num_sent_success = 0;
+		this->NEXT_SN = 0;
+		this->NEXT_EXPECTED_FRAME=0;
+	}
+	~GBN() {
+		ES.clear();
+	}
+
+	void es_sorted_insert(simEvent event) {
+		list<simEvent>::iterator next = ES.begin();
+		while (next != ES.end()) {
+			if (next->time > event.time) {
+				ES.insert(next, event);
+				return;
+			}
+			++next;
+		}
+		ES.push_back(event);
+	}
+
+	bool rotate_buffer(int SN) {
+		int position = 1;
+		for (list<Packet>::iterator pkt = BUFFER.begin(); pkt != BUFFER.end();
+				++pkt) {
+			if (pkt->SN == SN) {
+				//if element, transmit new packets to fill buffer
+				//count position of the element
+				for (int i = 0; i < position; i++) {
+					BUFFER.pop_front();
+					Packet tx;
+					this->tc +=
+							((double) (this->l + this->H) / (double) this->C)
+									+ this->Tau;
+					tx.timeout = this->tc + (double) this->Delta;
+					tx.SN = this->NEXT_SN;
+					BUFFER.push_back(tx);
+					SEND(this->tc, tx.SN);
+					this->NEXT_SN = (this->NEXT_SN + 1) % (window_size + 1);
+				}
+				//purge timeouts
+				//set timeout
+				addTimeout(BUFFER.begin()->timeout);
+				return true;
+			}
+			position++;
+		}
+
+		return false;
+	}
+
+	bool sn_in_buffer(int SN) {
+		for (list<Packet>::iterator pkt = BUFFER.begin(); pkt != BUFFER.end();
+				++pkt) {
+			if (pkt->SN == SN) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	void retransmit_all() {
+		list<Packet> NEWBUFFER;
+		for (list<Packet>::iterator pkt = BUFFER.begin(); pkt != BUFFER.end();
+				++pkt) {
+			this->tc += ((double) (this->l + this->H) / (double) this->C)
+					+ this->Tau;
+			Packet rx;
+			rx.timeout = this->tc + (double) this->Delta;
+			rx.SN = pkt->SN;
+			NEWBUFFER.push_back(rx);
+			SEND(this->tc, rx.SN); //resend packet with this SN
+		}
+		BUFFER.clear();
+		BUFFER = NEWBUFFER;
+		addTimeout(BUFFER.begin()->timeout);
+	}
+
+	void send_packets() {
+		for (int i = 0; i <= window_size; ++i) {
+			this->tc += ((double) (this->l + this->H) / (double) this->C)
+					+ this->Tau;
+			Packet pkt;
+			pkt.SN = this->NEXT_SN;
+			pkt.timeout = this->tc + (double) this->Delta;
+			BUFFER.push_back(pkt);
+			SEND(this->tc, pkt.SN);
+			this->NEXT_SN = (this->NEXT_SN + 1) % (window_size + 1);
+		}
+		addTimeout(BUFFER.begin()->timeout);
+		while (this->num_sent_success < this->num_packets) {
+			simEvent latest = getEvent();
+			this->tc = latest.time;
+			if (latest.type == TIMEOUT) {
+				//printf("TIMEOUT SN %d tc %f \r\n", this->NEXT_SN, this->tc);
+				fflush(stdout);
+				retransmit_all();
+			} else {
+				int source_sn = (latest.SN-1 < 0) ? window_size: latest.SN-1;
+				bool in_buffer = rotate_buffer(source_sn);
+				//check if sn in the buffer, and transmit new packets to fill the buffer
+				if (!latest.error && in_buffer) {
+					//printf("OK SN %d tc %f \r\n", latest.SN, this->tc);
+					fflush(stdout);
+				} else {
+					//printf("ERR SN %d tc %f \r\n", latest.SN, this->tc);
+					//fflush(stdout);
+					//ERROR FRAME
+					//IGNORED!
+				}
+			}
+		}
+	}
+
+	void purgeTimeouts() {
+		ES.remove_if(timeout_event);
+	}
+
+	void addTimeout(double time) {
+		purgeTimeouts();
+		simEvent* timeout = new simEvent();
+		timeout->time = time;
+		this->es_sorted_insert(*timeout);
+	}
+
+	simEvent getEvent() {
+		simEvent v = *ES.begin();
+		ES.pop_front();
+		return v;
+	}
+
+	void SEND(double time, int SN) {
+		//printf("Sending SN %d tc %f \r\n", SN, time);
+		fflush(stdout);
+		ErrorType ack_value = this->RECIEVE(time, SN);
+		if (ack_value != LOSS) {
+			//NOT LOST - ADD ACK TO ES
+			simEvent* ack = new simEvent();
+			ack->type = ACK;
+			ack->SN = NEXT_EXPECTED_FRAME;
+			ack->time = time + this->Tau
+					+ ((double) this->H / (double) this->C);
+			ack->error = (bool) (ack_value == ERROR);
+			this->es_sorted_insert(*ack);
+		} else {
+			printf("LOSS SN %d tc %f \r\n", SN, time);
+			fflush(stdout);
+		}
+		return;
+	}
+
+	int bits_in_error() {
+		/*
+		 We expect you to run L iterations.
+		 1-> probability BER
+		 Count errors for L bits
+		 */
+		int count = 0;
+		for (int i = 0; i < this->l; i++) {
+			count += (uniform_rv() >= this->BER) ? 0 : 1;
+		}
+		return count;
+	}
+
+	ErrorType RECIEVE(double tc, int SN) {
+		//Calculate bits in error, and flag packet
+		int BIE = bits_in_error();
+		// LOSS - 5 or more bit errors to be a lost frame
+		//ERROR - 1 to 4 bits in error
+		//OK - 0
+		if (BIE >= 5) {
+			return LOSS;
+		} else if (BIE > 1) {
+			//ERROR
+			return ERROR;
+		} else {
+			if (sn_in_buffer(SN)) {
+				this->num_sent_success++;
+				NEXT_EXPECTED_FRAME = (NEXT_EXPECTED_FRAME + 1) % (window_size + 1);
+			}
+			//OK
+		}
+		return NONE;
+	}
+};
+
 }
-void question_1(double BER){
+void question_1(double BER) {
 	printf("BER: %f\n", BER);
 	printf("H\tL\tDelta\tC\tTau\tBER\t#Packets\tThroughput\n");
 	int C = 5 * pow(1024, 2);
@@ -332,20 +546,32 @@ void question_1(double BER){
 	int L = 1500;
 	int H = 54;
 	double Tau = 0.010;
-	for (double x = 2.5; x < 13; x+=2.5){
+	for (double x = 2.5; x < 13; x += 2.5) {
 		double Delta = x * Tau;
-	//double Tau = 0.500;
 		Sim::ABPSimulator* sim = new Sim::ABPSimulator(H, L, Delta, C, Tau, BER,
 				num_packets);
 		sim->send_packets();
-		printf("%d\t%d\t%f\t%d\t%f\t%f\t%d\t",H,L, Delta, C, Tau, BER, num_packets);
-		printf("%f\n", ((double)num_packets * (double)L) / (double) sim->tc);
+		printf("%d\t%d\t%f\t%d\t%f\t%f\t%d\t", H, L, Delta, C, Tau, BER,
+				num_packets);
+		printf("%f\n", ((double) num_packets * (double) L) / (double) sim->tc);
+		fflush(stdout);
+		delete sim;
+	}
+	Tau = 0.500;
+	for (double x = 2.5; x < 13; x += 2.5) {
+		double Delta = x * Tau;
+		Sim::ABPSimulator* sim = new Sim::ABPSimulator(H, L, Delta, C, Tau, BER,
+				num_packets);
+		sim->send_packets();
+		printf("%d\t%d\t%f\t%d\t%f\t%f\t%d\t", H, L, Delta, C, Tau, BER,
+				num_packets);
+		printf("%f\n", ((double) num_packets * (double) L) / (double) sim->tc);
 		fflush(stdout);
 		delete sim;
 	}
 }
 
-void question_2(double BER){
+void question_3(double BER, int window_size) {
 	printf("BER: %f\n", BER);
 	printf("H\tL\tDelta\tC\tTau\tBER\t#Packets\tThroughput\n");
 	int C = 5 * pow(1024, 2);
@@ -353,33 +579,40 @@ void question_2(double BER){
 	int L = 1500;
 	int H = 54;
 	double Tau = 0.010;
-	for (double x = 2.5; x < 13; x+=2.5){
+	for (double x = 2.5; x < 13; x += 2.5) {
 		double Delta = x * Tau;
-	//double Tau = 0.500;
-		Sim::ABP_NAK* sim = new Sim::ABP_NAK(H, L, Delta, C, Tau, BER,
-				num_packets);
+		Sim::GBN* sim = new Sim::GBN(H, L, Delta, C, Tau, BER, num_packets,
+				window_size);
 		sim->send_packets();
-		printf("%d\t%d\t%f\t%d\t%f\t%f\t%d\t",H,L, Delta, C, Tau, BER, num_packets);
-		printf("%f\n", ((double)num_packets * (double)L) / (double) sim->tc);
+		printf("%d\t%d\t%f\t%d\t%f\t%f\t%d\t", H, L, Delta, C, Tau, BER,
+				num_packets);
+		printf("%f\n", ((double) num_packets * (double) L) / (double) sim->tc);
+		fflush(stdout);
+		delete sim;
+	}
+	Tau = 0.500;
+	for (double x = 2.5; x < 13; x += 2.5) {
+		double Delta = x * Tau;
+		Sim::GBN* sim = new Sim::GBN(H, L, Delta, C, Tau, BER, num_packets,
+				window_size);
+		sim->send_packets();
+		printf("%d\t%d\t%f\t%d\t%f\t%f\t%d\t", H, L, Delta, C, Tau, BER,
+				num_packets);
+		printf("%f\n", ((double) num_packets * (double) L) / (double) sim->tc);
 		fflush(stdout);
 		delete sim;
 	}
 }
-
 
 int main(void) {
 	srand(time(NULL));
 	question_1(0.0);
-	question_1(pow(10,-5));
-	question_1(pow(10,-4));
+	//question_1(pow(10, -5));
+	//question_1(pow(10, -4));
+
+	question_3(0, 0);
+	//question_3(pow(10, -4),4);
 	return 0;
-//k_values	.push_back(5);
-//	k_values.push_back(10);
-//	k_values.push_back(40);
-//	question_1();
-//	question_3();
-//	question_4();
-//	question_6();
 }
 ;
 
