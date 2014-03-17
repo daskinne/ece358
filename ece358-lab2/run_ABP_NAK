@@ -1,0 +1,2 @@
+#!/bin/sh
+./ece358-lab2.exe 2 > ABP_NAK.csv

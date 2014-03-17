@@ -1,0 +1,2 @@
+#!/bin/sh
+./ece358-lab2.exe 1 > ABP.csv
